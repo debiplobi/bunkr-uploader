@@ -93,5 +93,8 @@ pub async fn create_album(
         .text()
         .await?;
     let json: AlbumCreateResponse = serde_json::from_str(&response)?;
+    if json.success {
+        println!("{}", "Done".green());
+    }
     Ok(json)
 }
