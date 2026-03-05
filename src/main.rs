@@ -1,7 +1,7 @@
 use clap::Parser;
 use colored::*;
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
+use rand::RngExt;
 use rand::distr::Alphanumeric;
 use reqwest::Client;
 use reqwest::header::HeaderValue;
