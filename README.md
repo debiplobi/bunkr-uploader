@@ -91,8 +91,3 @@ bunkr-uploader -f ./files
 ## Notes
 
 -   Files larger than **2GB** are rejected.
--   Uploads may be **chunked automatically** for large files.
--   A log file is created to avoid uploading the same file twice.
--   Use `-f` to force re-upload.
-
-------------------------------------------------------------------------
