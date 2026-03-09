@@ -1,2 +1,4 @@
 pub mod api;
-pub mod extras;
+pub mod fs;
+pub mod paths;
+pub mod token;

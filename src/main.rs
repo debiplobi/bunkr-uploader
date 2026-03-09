@@ -1,47 +1,13 @@
 use clap::Parser;
 use colored::*;
-use indicatif::{ProgressBar, ProgressStyle};
 use rand::RngExt;
 use rand::distr::Alphanumeric;
-use reqwest::Client;
-use reqwest::header::HeaderValue;
-use reqwest::multipart::{Form, Part};
-use serde::Deserialize;
-use std::cmp::min;
-use std::collections::HashMap;
-use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::{
-    env,
-    fs::{self},
-    io::{self},
-};
-use uuid::Uuid;
+use std::env;
+use std::fs::{self, OpenOptions};
+use std::io::BufWriter;
 
-use crate::utils::extras::handle_paths;
 mod modules;
 mod utils;
-
-#[derive(Debug, Deserialize)]
-pub struct FinalResponse {
-    pub success: bool,
-    pub files: Vec<Files>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct Files {
-    pub name: String,
-    pub url: String,
-}
-
-pub struct FileInfo {
-    pub name: String,
-    pub size: u64,
-    pub mime_type: String,
-}
 
 #[derive(Parser)]
 pub struct Args {
@@ -55,44 +21,16 @@ pub struct Args {
 #[tokio::main]
 async fn main() {
     human_panic::setup_panic!();
-    let paths = Args::parse().paths;
-    let force_upload = Args::parse().force;
+    let args = Args::parse();
+    let paths = args.paths;
+    let force_upload = args.force;
 
-    let mut files_paths: Vec<PathBuf> = vec![];
-    let mut upload_from_all_sub_dir = false;
-    for path in paths {
-        handle_paths(path, &mut files_paths, &mut upload_from_all_sub_dir);
-    }
     let home = env::var("HOME").expect("HOME is not set");
     let resources_path = format!("{}/.local/share/bunkr-uploader", home);
-    if files_paths.len() == 0 {
-        let picked_files = format!("{}/yazi-picked.txt", &resources_path);
-        let yazi_exists = Command::new("yazi").arg("--version").output().is_ok();
 
-        if yazi_exists {
-            let _ = Command::new("yazi")
-                .arg("--chooser-file")
-                .arg(&picked_files)
-                .status();
-
-            if let Ok(content) = fs::read_to_string(&picked_files) {
-                for file in content.lines() {
-                    handle_paths(
-                        file.to_string(),
-                        &mut files_paths,
-                        &mut upload_from_all_sub_dir,
-                    );
-                }
-            } else {
-                eprintln!("No files selected.");
-                return;
-            }
-
-            let _ = fs::remove_file(&picked_files);
-        } else {
-            eprintln!("yazi not installed, please manually pass the file paths");
-            return;
-        }
+    let files_paths = utils::paths::get_file_paths(paths, &resources_path);
+    if files_paths.is_empty() {
+        return;
     }
 
     println!("You are uploading: ");
@@ -101,7 +39,7 @@ async fn main() {
     }
     println!(
         "{}",
-        format!("Total files: {}", &files_paths.len())
+        format!("Total files: {}", files_paths.len())
             .yellow()
             .bold()
     );
@@ -114,139 +52,48 @@ async fn main() {
         .map(char::from)
         .collect();
 
-    delete_all_dir(&resources_path);
+    utils::fs::delete_all_dir(&resources_path);
 
-    let chunks_folder = format!("{}/{}", &resources_path, &random_string,);
-
+    let chunks_folder = format!("{}/{}", &resources_path, &random_string);
     fs::create_dir_all(&chunks_folder).expect("failed to create chunks directory");
+
     let logs_file = OpenOptions::new()
         .append(true)
         .create(true)
         .open(&logs_file_path)
         .unwrap();
-
     let mut logs_file_writer = BufWriter::new(logs_file);
-    let token: String = utils::extras::handle_token(token_file_path).await;
 
+    let token: String = utils::token::handle_token(token_file_path).await;
     let upload_url: String = match utils::api::get_data(&token).await {
         Ok(data) => {
             let url: String = data["url"].to_string().parse().unwrap();
-            let clean_url = url.trim_matches('"');
-            clean_url.to_owned()
+            url.trim_matches('"').to_owned()
         }
-
         Err(e) => {
             println!("Error: {}", e);
             return;
         }
     };
 
-    println!("Add to album ? y/n");
+    let album_id = modules::album::get_or_create_album(&token).await;
 
-    let mut upload_to_album: String = String::new();
-    io::stdin().read_line(&mut upload_to_album).unwrap();
+    let (uploads_direct_urls, skipped_count) = modules::upload::process_uploads(
+        &files_paths,
+        force_upload,
+        &chunks_folder,
+        &upload_url,
+        &token,
+        &album_id,
+        &logs_file_path,
+        &mut logs_file_writer,
+    )
+    .await;
 
-    let mut album_id: String = String::new();
-
-    if upload_to_album.trim() == "y"
-        || upload_to_album.trim() == "Y"
-        || upload_to_album.trim() == ""
-    {
-        println!("create a new album ? y/n");
-
-        let mut create_album_input: String = String::new();
-        io::stdin().read_line(&mut create_album_input).unwrap();
-        if create_album_input.trim() == "y"
-            || create_album_input.trim() == "Y"
-            || create_album_input.trim() == ""
-        {
-            album_id = modules::create_album::create_album_fn(&token).await;
-        } else {
-            match utils::api::get_albums(&token).await {
-                Ok(data) => {
-                    let labels: Vec<String> = data
-                        .albums
-                        .iter()
-                        .map(|album| format!("{} (id: {})", album.name, album.id))
-                        .collect();
-                    let selection = dialoguer::Select::new()
-                        .with_prompt("Select an Album")
-                        .items(&labels)
-                        .default(0)
-                        .interact()
-                        .unwrap();
-                    album_id = data.albums[selection].id.to_string();
-                }
-                Err(err) => eprintln!("Error getting albums{}", err),
-            };
-        }
-    }
-    let mut uploads_direct_urls: Vec<String> = vec![];
-    let mut skipped_files: Vec<PathBuf> = vec![];
-    for file_path in &files_paths {
-        let current_dir = env::current_dir().unwrap();
-        let absolute_file_path = current_dir.join(&file_path);
-        let file_info = get_file_info(&file_path);
-
-        let logs_contents: String = match fs::read_to_string(&logs_file_path) {
-            Ok(content) => content,
-            Err(e) => {
-                eprintln!("Failed to read from logs file {}", e);
-                "".to_string()
-            }
-        };
-        let file_path_string = file_path.to_string_lossy().to_string();
-
-        if logs_contents.contains(&file_path_string) && !force_upload {
-            skipped_files.push(absolute_file_path);
-            eprintln!(
-                "{} Skipped, due to file already has been uploaded.",
-                file_info.name
-            );
-            continue;
-        }
-
-        if file_info.size > 2000 * 1000 * 1000 {
-            eprintln!("Failed to upload '{}', is more than 2GB", file_info.name);
-            continue;
-        }
-        let uuid = Uuid::new_v4();
-        let uuid_str = uuid.to_string();
-
-        let chunk_size: u64 = 25 * 1000 * 1000;
-        if file_info.size < chunk_size {
-            let _ = upload_file(
-                upload_url.to_owned(),
-                token.to_owned(),
-                file_info,
-                album_id.to_owned(),
-                absolute_file_path.to_owned(),
-                &mut uploads_direct_urls,
-                &mut logs_file_writer,
-            )
-            .await;
-        } else {
-            let total_chunks: u8 =
-                make_file_chunks(&absolute_file_path, &chunks_folder, chunk_size);
-            let _ = upload_big_file(
-                &chunks_folder,
-                &upload_url,
-                &token,
-                &uuid_str,
-                file_info,
-                total_chunks,
-                chunk_size,
-                &album_id,
-                &mut uploads_direct_urls,
-                absolute_file_path,
-                &mut logs_file_writer,
-            )
-            .await;
-        }
-    }
     for (index, url) in uploads_direct_urls.iter().enumerate() {
         println!("{}: {}", index + 1, url.yellow());
     }
+
     println!(
         "{}",
         format!("Success: {}", uploads_direct_urls.len())
@@ -258,270 +105,11 @@ async fn main() {
         "{}",
         format!(
             "Failed: {}",
-            &files_paths.len() - (&uploads_direct_urls.len() + skipped_files.len())
+            files_paths.len() - (uploads_direct_urls.len() + skipped_count)
         )
         .red()
         .bold()
     );
-    fs::remove_dir_all(chunks_folder).expect("failed to remove chunks directory");
-}
 
-fn get_file_info(file_path: &PathBuf) -> FileInfo {
-    let basename = Command::new("basename")
-        .arg(&file_path)
-        .output()
-        .expect("basename command failed to start");
-    let name = str::from_utf8(&basename.stdout).unwrap().trim().to_string();
-
-    let get_size = Command::new("stat")
-        .arg("-c%s")
-        .arg(&file_path)
-        .output()
-        .expect("size command failed to start");
-    let str_size = str::from_utf8(&get_size.stdout).unwrap().trim();
-    let size: u64 = str_size.parse().unwrap();
-
-    let mimetype_stdout = Command::new("file")
-        .arg("--mime-type")
-        .arg("-b")
-        .arg(&file_path)
-        .output()
-        .expect("size command failed to start");
-    let mime_type = str::from_utf8(&mimetype_stdout.stdout)
-        .expect("invalid UTF-8 in `file` output")
-        .trim()
-        .to_string();
-
-    FileInfo {
-        name,
-        size,
-        mime_type,
-    }
-}
-
-fn make_file_chunks(file: &PathBuf, chunks_folder: &str, chunk_size: u64) -> u8 {
-    let input_file = File::open(&file).unwrap();
-    let mut reader = BufReader::new(input_file);
-    // let chunk_size_usize: u64 = chunk_size.try_into().unwrap();
-    let mut buffer = vec![0u8; chunk_size.try_into().unwrap()];
-    let mut chunk_index = 0;
-    loop {
-        let bytes_read = reader.read(&mut buffer).unwrap();
-        if bytes_read == 0 {
-            break;
-        }
-
-        let chunk_filename = format!("chunk_{}", chunk_index);
-        let chunk_path = Path::new(chunks_folder).join(&chunk_filename);
-        let mut chunk_file = File::create(&chunk_path).unwrap();
-        chunk_file.write_all(&buffer[..bytes_read]).unwrap();
-        chunk_index += 1;
-    }
-    return chunk_index;
-}
-
-async fn upload_big_file(
-    chunks_folder: &str,
-    upload_url: &str,
-    token: &str,
-    uuid: &str,
-    file_info: FileInfo,
-    total_chunks: u8,
-    chunk_size: u64,
-    album_id: &str,
-    uploads_direct_urls: &mut Vec<String>,
-    absolute_file_path: PathBuf,
-    logs_file_writer: &mut BufWriter<File>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
-    let mut uploaded = 0;
-    let total_size = file_info.size;
-    let pb = ProgressBar::new(total_size.into());
-    pb.set_style(
-        ProgressStyle::default_bar()
-            .template("{msg} [{bar:40.green/black}] {bytes}/{total_bytes} {percent}%")
-            .unwrap()
-            .progress_chars("=>-"),
-    );
-    pb.set_message(format!("{}", file_info.name));
-
-    for chunk_index in 0..total_chunks {
-        let chunk_filename = format!("chunk_{}", chunk_index);
-        let chunk_index_path = PathBuf::from(chunks_folder).join(&chunk_filename);
-        if !chunk_index_path.exists() {
-            println!("✗ Chunk file {} does not exist, skipping", chunk_filename);
-            continue;
-        }
-        let file_contents = match fs::read(&chunk_index_path) {
-            Ok(contents) => contents,
-            Err(e) => {
-                println!("✗ Failed to read {}: {}", chunk_filename, e);
-                continue;
-            }
-        };
-
-        let byte_offset = chunk_index as u64 * chunk_size as u64;
-        let file_part = Part::bytes(file_contents).file_name(chunk_filename);
-
-        let form = Form::new()
-            .text("dzuuid", uuid.to_string())
-            .text("dzchunkindex", chunk_index.to_string())
-            .text("dztotalfilesize", file_info.size.to_string())
-            .text("dzchunksize", chunk_size.to_string())
-            .text("dztotalchunkcount", total_chunks.to_string())
-            .text("dzchunkbyteoffset", byte_offset.to_string())
-            .part("files[]", file_part);
-
-        let request = client
-            .post(upload_url)
-            .header("token", HeaderValue::from_str(&token)?);
-        let request_with_form = request.multipart(form);
-        let res = match request_with_form.send().await {
-            Ok(response) => response,
-            Err(e) => {
-                println!(
-                    "✗ Network error while uploading chunk {}: {}",
-                    chunk_index, e
-                );
-                continue;
-            }
-        };
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res
-                .text()
-                .await
-                .unwrap_or_else(|_| "Could not read response".to_string());
-            println!(
-                "✗ Upload failed for chunk {}: Status Code: {} - Response: {}",
-                chunk_index, status, body
-            );
-            continue;
-        }
-        let new_progrss = min(uploaded + chunk_size, file_info.size);
-        uploaded = new_progrss;
-        pb.set_position(new_progrss.into());
-        fs::remove_file(chunk_index_path).unwrap();
-    }
-
-    let mut map: HashMap<&str, String> = HashMap::new();
-    map.insert("uuid", uuid.to_string());
-    map.insert("original", file_info.name.to_string());
-    map.insert("type", file_info.mime_type.to_string());
-    if !album_id.is_empty() {
-        map.insert("albumid", album_id.to_string());
-    }
-    map.insert("age", "null".to_string());
-    map.insert("filelength", "null".to_string());
-    let finish_chunk_endpoint = format!("{}/finishchunks", upload_url);
-
-    let mut final_payload = HashMap::new();
-    final_payload.insert("files", [map]);
-
-    let rebuild_file_res = client
-        .post(&finish_chunk_endpoint)
-        .header("token", HeaderValue::from_str(&token)?)
-        .json(&final_payload)
-        .send()
-        .await
-        .unwrap();
-    if !rebuild_file_res.status().is_success() {
-        eprintln!("Failed to Upload the file, {:?}", rebuild_file_res);
-    }
-
-    if rebuild_file_res.status() == 500 {
-        eprintln!(
-            "{}",
-            "You have been rate limited, Please try again after sometime".bold()
-        );
-    }
-    let res_body = rebuild_file_res.text().await.unwrap();
-
-    let data: FinalResponse = serde_json::from_str(&res_body)?;
-    println!("{} ✔ ", file_info.name);
-    uploads_direct_urls.push(data.files[0].url.to_string());
-
-    let full_path_string = absolute_file_path.to_string_lossy();
-    writeln!(logs_file_writer, "{}", full_path_string)?;
-    writeln!(logs_file_writer, "{}", file_info.name)?;
-    logs_file_writer.flush().unwrap();
-
-    Ok(())
-}
-
-async fn upload_file(
-    upload_url: String,
-    token: String,
-    file_info: FileInfo,
-    album_id: String,
-    full_path: PathBuf,
-    uploads_direct_urls: &mut Vec<String>,
-    logs_file_writer: &mut BufWriter<File>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let client = Client::new();
-
-    let file_contents = match fs::read(&full_path) {
-        Ok(contents) => contents,
-        Err(e) => {
-            println!("✗ Failed to read {}", e);
-            Err(e)?
-        }
-    };
-
-    let file_part = Part::bytes(file_contents).file_name(file_info.name.clone());
-    let form = Form::new().part("files[]", file_part);
-
-    let request = client
-        .post(&upload_url)
-        .header("token", HeaderValue::from_str(&token)?)
-        .header("albumid", HeaderValue::from_str(&album_id)?);
-    let request_with_form = request.multipart(form);
-    let res = match request_with_form.send().await {
-        Ok(response) => response,
-        Err(e) => {
-            println!("✗ Network error while uploading chunk : {}", e);
-            Err(e)?
-        }
-    };
-    if res.status() != 200 {
-        eprintln!("Failed to upload,  {:?}", &res);
-    }
-
-    if res.status() == 500 {
-        eprintln!(
-            "{}",
-            "You have been rate limited, Please try again after sometime.".bold()
-        );
-    }
-    let json_data: FinalResponse = serde_json::from_str(&res.text().await.unwrap())?;
-
-    let url = json_data.files[0].url.to_string();
-    // println!("Upload URL: {}", json_data.files[0].url.yellow().bold());
-
-    if !url.is_empty() {
-        uploads_direct_urls.push(url);
-    }
-
-    let full_path_string = full_path.to_string_lossy();
-    writeln!(logs_file_writer, "{}", full_path_string)?;
-    writeln!(logs_file_writer, "{}", file_info.name)?;
-    logs_file_writer.flush().unwrap();
-
-    println!("{} ✔ ", file_info.name);
-    Ok(())
-}
-
-fn delete_all_dir(resources_path: &str) {
-    match fs::read_dir(resources_path) {
-        Ok(entries) => {
-            for entry in entries {
-                let path = entry.expect("failed to read directory entry").path();
-                if path.is_dir() {
-                    fs::remove_dir_all(path).expect("failed to remove chunk directory");
-                }
-            }
-        }
-        Err(e) => eprintln!("failed to read resources path, {}", e),
-    };
+    let _ = fs::remove_dir_all(chunks_folder);
 }

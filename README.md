@@ -18,6 +18,7 @@ a progress bar while uploading.
 -   Upload directories and sub-directories recursively
 -   Upload files individually or to an album
 -   Upload progress bar
+-   **yazi** file picker support (opens automatically when no paths are provided)
 
 ------------------------------------------------------------------------
 
@@ -84,6 +85,12 @@ Force upload:
 
 ``` bash
 bunkr-uploader -f ./files
+```
+
+Use `yazi` file picker:
+
+``` bash
+bunkr-uploader
 ```
 
 ------------------------------------------------------------------------

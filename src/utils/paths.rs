@@ -1,68 +1,7 @@
-use base64::{Engine as _, engine::general_purpose};
-use core::panic;
-use std::io::{ErrorKind, Write};
-use std::{
-    fs::{self},
-    io::{self},
-};
-async fn get_actual_token(token: &str, token_file_path: &str) -> String {
-    let mut verified: bool = false;
-    let mut prev_valid_token: bool = true;
-    let mut new_token: String = Default::default();
-
-    while !verified {
-        if token.is_empty() || !prev_valid_token {
-            io::stdout().flush().unwrap();
-            println!("Enter token: ");
-            let mut input_token: String = String::new();
-            io::stdin().read_line(&mut input_token).unwrap();
-            new_token = input_token.trim().to_string();
-            if new_token.is_empty() {
-                eprintln!("Token can't be empty");
-                continue;
-            }
-        } else {
-            new_token = token.to_string();
-        }
-
-        let is_token_verified = match super::api::verify_token(&new_token).await {
-            Ok(data) => data.success,
-            Err(e) => {
-                // eprintln!("{:?}", e);
-                eprintln!("Token verification failed due to: {}", e);
-                // break;
-                panic!("Token verification failed due to: {}", e);
-            }
-        };
-
-        if !is_token_verified {
-            eprintln!("Invalid Token");
-            prev_valid_token = false;
-            continue;
-        }
-        let b64 = general_purpose::STANDARD.encode(&new_token);
-        fs::write(&token_file_path, b64).unwrap();
-        verified = true;
-    }
-    new_token
-}
-
-pub async fn handle_token(token_file_path: String) -> String {
-    let token = match fs::read_to_string(&token_file_path) {
-        Ok(content) => {
-            let b64_decoded = general_purpose::STANDARD.decode(&content).unwrap();
-            String::from_utf8(b64_decoded).unwrap()
-        }
-
-        Err(err) => match err.kind() {
-            ErrorKind::NotFound => get_actual_token("", &token_file_path).await,
-            _ => return Err(err).expect("Failed to parse token file"),
-        },
-    };
-    let verified_token = get_actual_token(&token, &token_file_path).await;
-    // println!("Token Verified");
-    verified_token
-}
+use std::io::ErrorKind;
+use std::path::PathBuf;
+use std::process::Command;
+use std::{fs, io};
 
 pub fn handle_paths(
     path: String,
@@ -125,4 +64,41 @@ pub fn handle_paths(
             }
         }
     }
+}
+
+pub fn get_file_paths(paths: Vec<String>, resources_path: &str) -> Vec<PathBuf> {
+    let mut files_paths: Vec<PathBuf> = vec![];
+    let mut upload_from_all_sub_dir = false;
+    for path in paths {
+        handle_paths(path, &mut files_paths, &mut upload_from_all_sub_dir);
+    }
+
+    if files_paths.is_empty() {
+        let picked_files = format!("{}/yazi-picked.txt", resources_path);
+        let yazi_exists = Command::new("yazi").arg("--version").output().is_ok();
+
+        if yazi_exists {
+            let _ = Command::new("yazi")
+                .arg("--chooser-file")
+                .arg(&picked_files)
+                .status();
+
+            if let Ok(content) = fs::read_to_string(&picked_files) {
+                for file in content.lines() {
+                    handle_paths(
+                        file.to_string(),
+                        &mut files_paths,
+                        &mut upload_from_all_sub_dir,
+                    );
+                }
+            } else {
+                eprintln!("No files selected.");
+            }
+
+            let _ = fs::remove_file(&picked_files);
+        } else {
+            eprintln!("yazi not installed, please manually pass the file paths");
+        }
+    }
+    files_paths
 }
