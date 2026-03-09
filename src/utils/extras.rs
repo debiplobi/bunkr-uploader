@@ -29,6 +29,8 @@ async fn get_actual_token(token: &str, token_file_path: &str) -> String {
             Ok(data) => data.success,
             Err(e) => {
                 // eprintln!("{:?}", e);
+                eprintln!("Token verification failed due to: {}", e);
+                // break;
                 panic!("Token verification failed due to: {}", e);
             }
         };
@@ -108,7 +110,8 @@ pub fn handle_paths(
                         }
                     }
                     Err(e) => {
-                        panic!("{}", e);
+                        eprintln!("{}", e);
+                        return;
                     }
                 }
             }
@@ -117,7 +120,8 @@ pub fn handle_paths(
             if e.kind() == ErrorKind::NotADirectory {
                 files_paths.push(path.into());
             } else {
-                panic!("{}", e);
+                eprintln!("{}", e);
+                return;
             }
         }
     }

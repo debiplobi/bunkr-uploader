@@ -63,9 +63,36 @@ async fn main() {
     for path in paths {
         handle_paths(path, &mut files_paths, &mut upload_from_all_sub_dir);
     }
+    let home = env::var("HOME").expect("HOME is not set");
+    let resources_path = format!("{}/.local/share/bunkr-uploader", home);
     if files_paths.len() == 0 {
-        println!("No paths given!");
-        return;
+        let picked_files = format!("{}/yazi-picked.txt", &resources_path);
+        let yazi_exists = Command::new("yazi").arg("--version").output().is_ok();
+
+        if yazi_exists {
+            let _ = Command::new("yazi")
+                .arg("--chooser-file")
+                .arg(&picked_files)
+                .status();
+
+            if let Ok(content) = fs::read_to_string(&picked_files) {
+                for file in content.lines() {
+                    handle_paths(
+                        file.to_string(),
+                        &mut files_paths,
+                        &mut upload_from_all_sub_dir,
+                    );
+                }
+            } else {
+                eprintln!("No files selected.");
+                return;
+            }
+
+            let _ = fs::remove_file(&picked_files);
+        } else {
+            eprintln!("yazi not installed, please manually pass the file paths");
+            return;
+        }
     }
 
     println!("You are uploading: ");
@@ -79,8 +106,6 @@ async fn main() {
             .bold()
     );
 
-    let home = env::var("HOME").expect("HOME is not set");
-    let resources_path = format!("{}/.local/share/bunkr-uploader", home);
     let token_file_path = format!("{}/token.txt", &resources_path);
     let logs_file_path = format!("{}/logs.txt", &resources_path);
     let random_string: String = rand::rng()
